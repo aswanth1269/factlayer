@@ -1,0 +1,23 @@
+[project]
+name = "factlayer"
+version = "0.1.0"
+description = "A fact knowledge layer over PDFs, with evidence grounding and cross-document reconciliation"
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    "pymupdf>=1.24",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "python-multipart>=0.0.9",
+    "openpyxl>=3.1",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+    "openai>=1.30",
+    "anthropic>=0.34",
+]
+
+# The project is a plain application, not a distributable library, so uv should
+# install the dependencies without trying to build factlayer itself.
+[tool.uv]
+package = false

@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fact knowledge layer</title>
+<style>
+  :root{
+    --ink:#151A21;        /* page */
+    --panel:#1D242D;      /* raised surface */
+    --line:#2C3440;
+    --text:#DCE3EB;
+    --muted:#8A97A6;
+    --paper:#F3EFE6;      /* evidence, rendered as document paper */
+    --paper-ink:#2A2621;
+    --agree:#5FA87B;
+    --conflict:#CF6A5E;
+    --context:#C79A45;
+    --related:#6C86A8;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--ink); color:var(--text);
+    font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .wrap{max-width:1020px;margin:0 auto;padding:32px 24px 96px}
+
+  header{display:flex;flex-wrap:wrap;gap:18px;align-items:baseline;
+    border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:24px}
+  h1{font-size:22px;font-weight:600;margin:0;letter-spacing:-.01em}
+  header p{margin:0;color:var(--muted);font-size:14px;max-width:52ch}
+
+  .bar{display:flex;flex-wrap:wrap;gap:26px;margin:22px 0 26px}
+  .stat b{display:block;font-size:24px;font-weight:600;letter-spacing:-.02em}
+  .stat span{color:var(--muted);font-size:12.5px}
+
+  .drop{border:1px dashed var(--line);border-radius:10px;padding:20px;
+    display:flex;gap:14px;align-items:center;flex-wrap:wrap;background:var(--panel)}
+  .drop.busy{border-style:solid;border-color:var(--context)}
+  input[type=file]{color:var(--muted);font-size:14px;max-width:100%}
+  button{font:inherit;font-size:14px;padding:8px 16px;border-radius:7px;
+    border:1px solid var(--line);background:#28313C;color:var(--text);cursor:pointer}
+  button:hover{background:#313C49}
+  button:focus-visible,input:focus-visible{outline:2px solid var(--context);outline-offset:2px}
+  .note{color:var(--muted);font-size:13px}
+  .drop a{text-decoration:none}
+
+  nav{display:flex;gap:6px;flex-wrap:wrap;margin:30px 0 16px}
+  nav button{background:transparent;border-color:transparent;color:var(--muted);padding:6px 12px}
+  nav button[aria-current=true]{background:var(--panel);border-color:var(--line);color:var(--text)}
+
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:18px;margin-bottom:14px;border-left:3px solid var(--line)}
+  .card[data-t=corroborates]{border-left-color:var(--agree)}
+  .card[data-t=contradicts]{border-left-color:var(--conflict)}
+  .card[data-t=reconciled]{border-left-color:var(--context)}
+  .card[data-t=related]{border-left-color:var(--related)}
+
+  .head{display:flex;justify-content:space-between;gap:12px;align-items:baseline;flex-wrap:wrap}
+  .metric{font-weight:600}
+  .tag{font-size:12px;color:var(--muted)}
+  .why{margin:12px 0 14px;color:var(--text)}
+
+  .sides{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:720px){.sides{grid-template-columns:1fr}}
+  .side{border:1px solid var(--line);border-radius:8px;padding:12px}
+  .val{font-size:18px;font-weight:600;letter-spacing:-.01em}
+  .coords{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 10px}
+  .chip{font-size:11.5px;padding:2px 8px;border-radius:20px;
+    border:1px solid var(--line);color:var(--muted)}
+  .chip.diff{border-color:var(--context);color:var(--context)}
+  .quote{background:var(--paper);color:var(--paper-ink);border-radius:6px;
+    padding:10px;font-size:12.5px;line-height:1.5;white-space:pre-wrap;
+    max-height:8.5em;overflow:auto}
+  .src{color:var(--muted);font-size:12px;margin-top:8px}
+  .bridge{margin-top:12px;border:1px solid var(--context);border-radius:8px;padding:12px}
+  .bridge h4{margin:0 0 8px;font-size:13px;font-weight:600;color:var(--context)}
+
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:500}
+  .empty{color:var(--muted);padding:40px 0;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Fact knowledge layer</h1>
+    <p>Upload a PDF. Every fact keeps its page and the span it came from, and every
+       link between two facts explains itself.</p>
+  </header>
+
+  <div class="bar" id="stats"></div>
+
+  <div class="drop" id="drop">
+    <input type="file" id="file" accept="application/pdf" multiple>
+    <button id="go">Add to knowledge layer</button>
+    <a href="/api/export.xlsx"><button type="button">Download as spreadsheet</button></a>
+    <span class="note" id="msg">Pages are read in order of how fact-dense they look.</span>
+  </div>
+
+  <nav id="tabs">
+    <button data-v="corroborates" aria-current="true">Corroborated</button>
+    <button data-v="contradicts">Contradictions</button>
+    <button data-v="reconciled">Explained by context</button>
+    <button data-v="related">Related</button>
+    <button data-v="rejects">Rejected extractions</button>
+    <button data-v="security">Flagged content</button>
+    <button data-v="search">Search</button>
+    <button data-v="documents">Documents</button>
+  </nav>
+
+  <div id="view"><div class="empty">Loading</div></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => (s ?? "").toString().replace(/[&<>"]/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let tab = "corroborates";
+
+async function get(p){ const r = await fetch(p); return r.json(); }
+
+async function loadStats(){
+  const s = await get("/api/stats");
+  const pct = s.extraction_precision == null ? "n/a"
+            : Math.round(s.extraction_precision * 100) + "%";
+  $("#stats").innerHTML = [
+    ["Documents", s.documents],
+    ["Verified facts", s.facts_verified],
+    ["Extraction precision", pct],
+    ["Cross-document links", s.cross_document_relations],
+    ["Distinct metrics", s.metric_vocabulary],
+  ].map(([k,v]) => `<div class="stat"><b class="mono">${esc(v)}</b><span>${k}</span></div>`)
+   .join("");
+}
+
+function coords(r, side){
+  const other = side === "a" ? "b" : "a";
+  const axes = r.axes_differ || [];
+  const rows = [
+    ["period", r[side+"_period"] || "no period"],
+    ["basis",  r[side+"_basis"]],
+    ["scope",  r[side+"_scope"]],
+  ];
+  return rows.map(([k,v]) =>
+    `<span class="chip ${axes.includes(k) ? "diff" : ""}">${k}: ${esc(v)}</span>`).join("");
+}
+
+function side(r, s){
+  const value = r[s+"_state"] || `${r[s+"_value"] ?? ""} ${r[s+"_unit"] ?? ""}`.trim();
+  return `<div class="side">
+    <div class="val mono">${esc(value)}</div>
+    <div class="coords">${coords(r, s)}</div>
+    <div class="quote">${esc(r[s+"_quote"])}</div>
+    <div class="src">${esc(r[s+"_doc"])} · page ${esc(r[s+"_page"])}</div>
+  </div>`;
+}
+
+function card(r){
+  return `<article class="card" data-t="${esc(r.rel_type)}">
+    <div class="head">
+      <span class="metric">${esc(r.a_metric)}</span>
+      <span class="tag">${esc(r.a_entity)}${r.cross_doc ? " · across documents" : " · same document"}</span>
+    </div>
+    <p class="why">${esc(r.explanation)}</p>
+    <div class="sides">${side(r,"a")}${side(r,"b")}</div>
+    ${r.support ? `<div class="bridge">
+        <h4>Reconciled using a third fact</h4>
+        <div class="quote">${esc(r.support.evidence_quote)}</div>
+        <div class="src">${esc(r.support.metric)} · page ${esc(r.support.page)}</div>
+      </div>` : ""}
+  </article>`;
+}
+
+async function render(){
+  const v = $("#view");
+  v.innerHTML = `<div class="empty">Loading</div>`;
+
+  if (tab === "documents"){
+    const d = await get("/api/documents");
+    v.innerHTML = d.length ? `<table><tr><th>File</th><th>Pages</th><th>Facts</th>
+      <th>Extraction</th></tr>` + d.map(x => `<tr><td>${esc(x.filename)}</td>
+      <td class="mono">${esc(x.pages)}</td><td class="mono">${esc(x.facts)}</td>
+      <td>${esc(x.detail || x.status)}</td></tr>`).join("") + `</table>`
+      : `<div class="empty">No documents yet. Add one above.</div>`;
+    return;
+  }
+
+  if (tab === "search"){
+    v.innerHTML = `<div class="drop" style="margin-bottom:16px">
+        <input id="q" placeholder="Search facts and evidence" style="flex:1;min-width:220px;
+          background:#28313C;border:1px solid var(--line);border-radius:7px;
+          color:var(--text);padding:8px 12px;font:inherit;font-size:14px">
+        <button id="qgo">Search</button>
+        <span class="note">Keyword ranking with BM25. No embeddings anywhere in this system.</span>
+      </div><div id="qres"></div>`;
+    const run = async () => {
+      const q = document.getElementById("q").value.trim();
+      if (!q) return;
+      const d = await get("/api/search?q=" + encodeURIComponent(q));
+      document.getElementById("qres").innerHTML = d.length
+        ? `<table><tr><th>Metric</th><th>Value</th><th>Context</th><th>Source</th></tr>`
+          + d.map(x => `<tr><td>${esc(x.metric)}<br><span class="tag">${esc(x.entity)}</span></td>
+            <td class="mono">${esc(x.state_value || (x.value_text + " " + (x.unit||"")))}</td>
+            <td class="tag">${esc([x.period,x.basis,x.scope].filter(Boolean).join(" · "))}</td>
+            <td>${esc(x.filename)} · page ${esc(x.page)}</td></tr>`).join("") + `</table>`
+        : `<div class="empty">Nothing matched that.</div>`;
+    };
+    document.getElementById("qgo").addEventListener("click", run);
+    document.getElementById("q").addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+    return;
+  }
+
+  if (tab === "security"){
+    const d = await get("/api/security");
+    const f = d.findings || [];
+    v.innerHTML = (f.length || d.quarantined_facts.length)
+      ? `<p class="note" style="margin-bottom:14px">${d.pages_flagged} page(s) carry content a
+          reader would not see, or language addressed to a model rather than a reader.
+          ${d.quarantined_facts.length} fact(s) were quarantined as a result.</p>`
+        + `<table><tr><th>Kind</th><th>Detail</th><th>Source</th><th>Content</th></tr>`
+        + f.map(x => `<tr><td>${esc(x.kind)}</td><td>${esc(x.detail)}</td>
+          <td>${esc(x.document)} · page ${esc(x.page)}</td>
+          <td class="mono">${esc(x.excerpt)}</td></tr>`).join("") + `</table>`
+      : `<div class="empty">No document has tripped the ingestion checks.</div>`;
+    return;
+  }
+
+  if (tab === "rejects"){
+    const d = await get("/api/rejects");
+    v.innerHTML = d.length ? `<table><tr><th>Why it was thrown out</th><th>Claimed</th>
+      <th>Source</th></tr>` + d.map(x => `<tr><td>${esc(x.reject_reason)}</td>
+      <td><span class="mono">${esc(x.value_text)} ${esc(x.unit)}</span><br>
+      <span class="tag">${esc(x.metric)}</span></td>
+      <td>${esc(x.filename)} · page ${esc(x.page)}</td></tr>`).join("") + `</table>`
+      : `<div class="empty">Nothing was rejected in this run.</div>`;
+    return;
+  }
+
+  const d = await get("/api/relations?rel_type=" + tab);
+  v.innerHTML = d.length ? d.map(card).join("")
+    : `<div class="empty">No ${tab} links yet. Add a second document to compare against.</div>`;
+}
+
+$("#tabs").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  tab = b.dataset.v;
+  [...$("#tabs").children].forEach(x => x.setAttribute("aria-current", x === b));
+  render();
+});
+
+$("#go").addEventListener("click", async () => {
+  const files = [...$("#file").files];
+  if (!files.length){ $("#msg").textContent = "Choose a PDF first."; return; }
+  $("#drop").classList.add("busy");
+  for (const f of files){
+    $("#msg").textContent = `Reading ${f.name}. This takes a minute or two per document.`;
+    const body = new FormData(); body.append("file", f);
+    try {
+      const r = await fetch("/api/documents", {method:"POST", body});
+      const j = await r.json();
+      $("#msg").textContent = j.skipped
+        ? `${f.name} was already in the layer, so nothing was re-read.`
+        : `${f.name}: ${j.facts_verified} facts verified, ${j.facts_rejected} rejected.`;
+    } catch (err) {
+      $("#msg").textContent = `${f.name} failed: ${err.message}`;
+    }
+    await loadStats();
+  }
+  $("#drop").classList.remove("busy");
+  render();
+});
+
+loadStats(); render();
+</script>
+</body>
+</html>
