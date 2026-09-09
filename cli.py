@@ -16,14 +16,30 @@ from factlayer import db, link, pipeline
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("paths", nargs="+")
+    ap.add_argument("paths", nargs="*", default=["."])
     ap.add_argument("--max-pages", type=int, default=None,
                     help="cap on pages read per PDF, highest fact-density first")
     ap.add_argument("--relink-only", action="store_true",
                     help="recompute relations without re-reading any PDF")
+    ap.add_argument("--reset", action="store_true",
+                    help="clear facts and relations but keep the extraction "
+                         "cache, so re-running costs no model calls")
     args = ap.parse_args()
 
     db.init()
+    if args.reset:
+        kept = db.one("SELECT COUNT(*) n FROM extraction_cache")["n"]
+        db.write("DELETE FROM relations")
+        db.write("DELETE FROM facts_fts")
+        db.write("DELETE FROM facts")
+        db.write("DELETE FROM chunks")
+        db.write("DELETE FROM documents")
+        db.write("DELETE FROM metric_aliases")
+        print(f"Cleared facts and relations. {kept} cached page(s) kept, so "
+              "re-ingesting the same PDFs costs nothing.")
+        if not args.paths or args.paths == ["."]:
+            return 0
+
     if args.relink_only:
         print(json.dumps(link.rebuild(), indent=2))
         return 0
