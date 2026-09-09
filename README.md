@@ -72,6 +72,30 @@ uv run python cli.py starter-datasets/delhivery/*.pdf --max-pages 40
 uv run python cli.py --relink-only .        # recompute relations, no re-reading
 ```
 
+### Building the whole layer with no API key
+
+There are two extractors behind one interface, chosen with
+`FACTLAYER_EXTRACTOR`. `llm` is the default and reads a page properly.
+`rules` reads it with regular expressions over PyMuPDF's text, costs nothing,
+and needs no network:
+
+```bash
+FACTLAYER_EXTRACTOR=rules uv run python cli.py starter-datasets/delhivery/*.pdf --max-pages 40
+```
+
+That builds all three documents in about twelve seconds with zero model calls:
+897 verified facts, each one checked against the span it came from, and 36
+cross-document reconciliations. `auto` prefers the model and falls back to the
+rules only when it returns nothing, which is what a rate-limited provider looks
+like from the inside.
+
+The rules extractor is genuinely worse at deciding what a number is *about* —
+it takes the nearest label as the metric and has no idea what it means. It is
+in the repository because it makes the layer inspectable without an account,
+and because it proves the extractor is a swappable part rather than the thing
+the system rests on. Both feed the same output contract, the same span
+verification, the same coordinate model and the same relation engine.
+
 To start over, delete the database. Nothing else holds state:
 
 ```bash
