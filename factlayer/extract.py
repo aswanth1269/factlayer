@@ -172,7 +172,8 @@ Return JSON: {"mapping": {"<new name>": "<canonical_key>", ...}} covering every
 new name given."""
 
 
-def canonicalize_metrics(surfaces: list[str], batch: int = 120) -> dict[str, str]:
+def canonicalize_metrics(surfaces: list[str], batch: int = 120,
+                         use_llm: bool = True) -> dict[str, str]:
     """Map metric surface forms to canonical keys, caching results in SQLite.
 
     Only unseen surface forms are sent to the model, so ingesting a fourth
@@ -201,6 +202,19 @@ def canonicalize_metrics(surfaces: list[str], batch: int = 120) -> dict[str, str
         )
     new = remaining
     if not new:
+        return known
+
+    # Slug-only mode. The slug pass above has already merged the surface forms
+    # that differ by whitespace or case; what the model adds is judgement about
+    # forms that differ by wording, and a run that has no model available is
+    # better off skipping that than spending a timeout per batch discovering it.
+    if not use_llm:
+        pairs = [(s.lower(), normalize.metric_slug(s)) for s in new]
+        known.update(dict(pairs))
+        db.write_many(
+            "INSERT OR REPLACE INTO metric_aliases (surface, metric_key) VALUES (?, ?)",
+            pairs,
+        )
         return known
 
     existing_keys = sorted(set(known.values()))

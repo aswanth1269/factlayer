@@ -4,7 +4,7 @@ import json
 import os
 import uuid
 
-from . import db, extract, guardrails, ingest, link, normalize, security
+from . import db, extract, guardrails, ingest, link, normalize, rules, security
 
 
 def process_pdf(path: str, filename: str, max_pages: int | None = None) -> dict:
@@ -48,8 +48,22 @@ def process_pdf(path: str, filename: str, max_pages: int | None = None) -> dict:
 
     print(f"[{filename}] {total_pages} pages, {len(chunks)} chunks queued")
     budget = guardrails.Budget()
-    workers = guardrails.env_int("FACTLAYER_WORKERS", 8)
-    pairs = extract.extract_all(chunks, workers=workers, budget=budget)
+    mode = (os.environ.get("FACTLAYER_EXTRACTOR") or "llm").strip().lower()
+
+    if mode == "rules":
+        pairs = rules.extract_all(chunks)
+    else:
+        workers = guardrails.env_int("FACTLAYER_WORKERS", 8)
+        pairs = extract.extract_all(chunks, workers=workers, budget=budget)
+        # "auto" means the model is preferred but not depended on. A provider
+        # that is rate limited or unreachable returns nothing for every page,
+        # and a corpus that is silently empty is worse than one extracted by
+        # weaker means, so the deterministic reader takes over rather than
+        # letting the document land with no facts at all.
+        if mode == "auto" and not any(f for _, f in pairs):
+            print(f"[{filename}] no facts from the model, falling back to rules")
+            pairs = rules.extract_all(chunks)
+            mode = "rules (fallback)"
 
     raw, kept, rejected = [], [], []
     for chunk, facts in pairs:
@@ -65,7 +79,8 @@ def process_pdf(path: str, filename: str, max_pages: int | None = None) -> dict:
 
     # One canonicalization pass over the metric vocabulary introduced here.
     surfaces = [f.get("metric") or "" for _, f, _ in kept]
-    alias = extract.canonicalize_metrics(surfaces)
+    alias = extract.canonicalize_metrics(
+        surfaces, use_llm=not mode.startswith("rules"))
 
     to_insert = []
     for chunk, f, _ in kept:
