@@ -10,7 +10,7 @@ import json
 import os
 import re
 
-from .guardrails import with_retry
+from .guardrails import LIMITER, env_int, with_retry
 
 PROVIDER = (os.environ.get("FACTLAYER_PROVIDER") or "").strip().lower()
 OPENAI_MODEL = os.environ.get("FACTLAYER_OPENAI_MODEL") or "gpt-4o-mini"
@@ -32,17 +32,24 @@ def _provider() -> str:
     )
 
 
-def complete_json(system: str, user: str, max_tokens: int = 4000) -> dict:
+def complete_json(system: str, user: str, max_tokens: int | None = None) -> dict:
     """Ask for a JSON object and return it parsed. Raises on unparseable output."""
-    return with_retry(lambda: _complete_json(system, user, max_tokens))
+    ceiling = max_tokens or env_int("FACTLAYER_MAX_TOKENS", 4000)
+    return with_retry(lambda: _complete_json(system, user, ceiling))
 
 
 def _complete_json(system: str, user: str, max_tokens: int) -> dict:
+    LIMITER.acquire()
     p = _provider()
     if p == "openai":
         from openai import OpenAI
 
-        client = OpenAI(base_url=OPENAI_BASE_URL) if OPENAI_BASE_URL else OpenAI()
+        # Without a deadline a stalled request holds its worker for the SDK's
+        # ten minute default, so one bad call parks a whole slot of the pool.
+        # Failing at 90s and retrying is strictly faster than waiting.
+        opts = {"timeout": float(env_int("FACTLAYER_TIMEOUT", 90)), "max_retries": 0}
+        client = (OpenAI(base_url=OPENAI_BASE_URL, **opts) if OPENAI_BASE_URL
+                  else OpenAI(**opts))
         r = client.chat.completions.create(
             model=OPENAI_MODEL,
             max_tokens=max_tokens,
@@ -53,7 +60,23 @@ def _complete_json(system: str, user: str, max_tokens: int) -> dict:
                 {"role": "user", "content": user},
             ],
         )
-        raw = r.choices[0].message.content
+        choice = r.choices[0]
+        raw = choice.message.content
+        # Reasoning models spend the same budget on thinking that they spend on
+        # the answer, so a page that needs a long chain of thought comes back
+        # with finish_reason "length" and content None. Saying so beats a
+        # NoneType error three frames down, and it names the fix.
+        if not raw:
+            reason = getattr(choice, "finish_reason", None)
+            if reason == "length":
+                raise RuntimeError(
+                    f"{OPENAI_MODEL} hit the {max_tokens} token ceiling before "
+                    "it finished the JSON. Raise FACTLAYER_MAX_TOKENS, or use a "
+                    "model that does not reason before answering."
+                )
+            raise RuntimeError(
+                f"{OPENAI_MODEL} returned an empty message (finish_reason={reason})."
+            )
     else:
         import anthropic
 

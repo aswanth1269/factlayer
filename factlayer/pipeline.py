@@ -87,7 +87,13 @@ def process_pdf(path: str, filename: str, max_pages: int | None = None) -> dict:
         (r[0], r[5], r[7], r[23]) for r in to_insert if r[24] == 1
     ])
 
-    stats = link.rebuild()
+    # Adding a document can only change relations for the entities that document
+    # actually mentions. Everything else in the corpus is already settled, so it
+    # is re-linked only on an explicit full rebuild. This is what keeps the cost
+    # of the eleventh upload the same as the cost of the second, instead of
+    # growing with the square of the corpus.
+    touched = sorted({r[6] for r in to_insert if r[24] == 1})
+    stats = link.rebuild_entities(touched)
     precision = round(len(kept) / len(raw), 3) if raw else None
     detail = (f"{len(raw)} extracted, {len(kept)} verified, {len(rejected)} rejected")
     db.write("UPDATE documents SET status='ready', detail=? WHERE id=?", (detail, doc_id))

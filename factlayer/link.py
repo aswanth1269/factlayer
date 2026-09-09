@@ -206,6 +206,36 @@ def classify(a: dict, b: dict) -> dict | None:
     }
 
 
+def rebuild_entities(entity_keys: list[str]) -> dict:
+    """Re-link only the entities a new document touched.
+
+    A full rebuild compares every fact against every other fact sharing its
+    entity and metric, so its cost grows with the size of the whole corpus. An
+    upload only ever changes the blocks it adds facts to, so this walks those
+    blocks and leaves the rest of the layer alone. The result is identical to a
+    full rebuild, because classify() is a pure function of the pair it is given.
+    """
+    if not entity_keys:
+        return _counts(0, 0, 0)
+    totals = {"relations": 0, "blocks": 0, "blocks_truncated": 0}
+    for key in entity_keys:
+        s = rebuild(key)
+        totals["relations"] += s["relations"]
+        totals["blocks"] += s["blocks"]
+        totals["blocks_truncated"] += s["blocks_truncated"]
+    return {**totals, "by_type": _by_type(), "entities_relinked": len(entity_keys)}
+
+
+def _by_type() -> dict:
+    return {r["rel_type"]: r["n"] for r in
+            db.rows("SELECT rel_type, COUNT(*) n FROM relations GROUP BY rel_type")}
+
+
+def _counts(relations: int, blocks: int, truncated: int) -> dict:
+    return {"relations": relations, "by_type": _by_type(),
+            "blocks": blocks, "blocks_truncated": truncated}
+
+
 def rebuild(entity_key: str | None = None) -> dict:
     """Recompute relations. Cheap enough to run after every upload."""
     where = "WHERE verified = 1"
@@ -239,7 +269,19 @@ def rebuild(entity_key: str | None = None) -> dict:
                 1 if a["doc_id"] != b["doc_id"] else 0,
             ))
 
-    db.write("DELETE FROM relations" + (" WHERE 1=1" if not entity_key else ""))
+    # A scoped rebuild has only recomputed one entity's relations, so it must
+    # only clear that entity's relations. Clearing the whole table here would
+    # delete every other entity's links and put back just this one, which is a
+    # silent corpus-wide data loss disguised as an optimisation.
+    if entity_key:
+        db.write(
+            """DELETE FROM relations
+                WHERE fact_a IN (SELECT id FROM facts WHERE entity_key = ?)
+                   OR fact_b IN (SELECT id FROM facts WHERE entity_key = ?)""",
+            (entity_key, entity_key),
+        )
+    else:
+        db.write("DELETE FROM relations")
     db.write_many(
         """INSERT OR IGNORE INTO relations
            (id, fact_a, fact_b, rel_type, axes_differ, explanation, support, cross_doc)

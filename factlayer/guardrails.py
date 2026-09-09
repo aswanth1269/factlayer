@@ -16,6 +16,7 @@ a broken one.
 import os
 import random
 import re
+import threading
 import time
 from typing import Any, Literal
 
@@ -187,8 +188,16 @@ TRANSIENT = ("rate limit", "429", "timeout", "timed out", "overloaded",
              "503", "502", "connection", "temporarily")
 
 
-def with_retry(fn, attempts: int = 3, base: float = 1.5):
-    """Retry transient API failures. A bad request is not retried."""
+def with_retry(fn, attempts: int | None = None, base: float = 2.0):
+    """Retry transient API failures. A bad request is not retried.
+
+    Free tiers answer a burst with 429 rather than a queue, so the retry has to
+    be patient enough to outlast the meter's window. Three tries a second and a
+    half apart is not, which is why extraction used to lose whole pages the
+    moment the worker pool grew. The backoff below reaches roughly a minute of
+    total waiting, which is the window most per-minute limits reset on.
+    """
+    attempts = attempts or env_int("FACTLAYER_RETRIES", 6)
     last: Exception | None = None
     for i in range(attempts):
         try:
@@ -198,8 +207,65 @@ def with_retry(fn, attempts: int = 3, base: float = 1.5):
             message = str(exc).lower()
             if not any(t in message for t in TRANSIENT) or i == attempts - 1:
                 raise
+            # A 429 means the meter is full, so every worker that hits one has
+            # to back off, not just this call. Widening the shared gate here is
+            # what stops a pool of 12 from spending its whole run in retries.
+            if "429" in message or "rate limit" in message:
+                LIMITER.penalise()
             time.sleep(base ** i + random.uniform(0, 0.4))
     raise last  # pragma: no cover
+
+
+# --------------------------------------------------------------------------
+# 4b. Rate limiting
+# --------------------------------------------------------------------------
+# The worker pool decides how many pages are read at once. The provider decides
+# how many calls per minute it will accept. Those are different numbers, and
+# without something in between, raising the first one just converts throughput
+# into 429s. This is the something in between: one shared gate, so concurrency
+# stays a tuning knob for latency rather than a way to trip the meter.
+
+
+class RateLimiter:
+    """A shared minimum spacing between model calls, in requests per minute.
+
+    Set FACTLAYER_RPM to the provider's published limit. Unset means no gate,
+    which is the right default for a paid key where concurrency is the point.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._next = 0.0
+        self._penalty = 0.0
+
+    @property
+    def interval(self) -> float:
+        rpm = env_int("FACTLAYER_RPM", 0) or 0
+        return 60.0 / rpm if rpm > 0 else 0.0
+
+    def acquire(self) -> None:
+        """Block until this caller's turn. A no-op when FACTLAYER_RPM is unset."""
+        gap = self.interval
+        if gap <= 0 and self._penalty <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + gap + self._penalty
+            # Each successful pass repays a little of the penalty, so one burst
+            # of 429s does not slow the rest of the run forever.
+            self._penalty = max(0.0, self._penalty - 0.25)
+        delay = start - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+
+    def penalise(self, seconds: float = 2.0) -> None:
+        """Widen the gate after a 429, up to a ceiling."""
+        with self._lock:
+            self._penalty = min(10.0, self._penalty + seconds)
+
+
+LIMITER = RateLimiter()
 
 
 # --------------------------------------------------------------------------
