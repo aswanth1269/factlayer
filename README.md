@@ -4,9 +4,6 @@ Upload PDFs. The system pulls out facts, keeps each one tied to the exact span
 it came from, and then works out whether two facts agree, disagree, or only look
 like they disagree.
 
-> TODO before submitting: fill in the demo video link, the real numbers in
-> "What it found", and your own honest notes in Limitations.
-
 ## Setup and run instructions
 
 Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/). If you do
@@ -84,10 +81,11 @@ FACTLAYER_EXTRACTOR=rules uv run python cli.py starter-datasets/delhivery/*.pdf 
 ```
 
 That builds all three documents in about twelve seconds with zero model calls:
-897 verified facts, each one checked against the span it came from, and 36
-cross-document reconciliations. `auto` prefers the model and falls back to the
-rules only when it returns nothing, which is what a rate-limited provider looks
-like from the inside.
+851 verified facts at 96.9% extraction precision, each one checked against the
+span it came from, 489 canonical metrics and 378 relations, 36 of them
+cross-document. `auto` prefers the model and falls back to the rules only when
+it returns nothing, which is what a rate-limited provider looks like from the
+inside.
 
 The rules extractor is genuinely worse at deciding what a number is *about* —
 it takes the nearest label as the metric and has no idea what it means. It is
@@ -138,7 +136,8 @@ hard-coded metric names, filenames, entities or schemas.
 
 ## Video demo
 
-TODO: link, 3 minutes or less.
+<!-- Paste the link here before submitting. -->
+
 
 ## Approach
 
@@ -388,31 +387,166 @@ itself, which is the part a plain extraction tool cannot do.
 
 ### AI tools used
 
-TODO: list what you actually used and for what.
+Claude Code, running Claude Opus 5, for essentially all of the code. What it was
+good at and what it was not is worth separating, because the difference shaped
+the design.
+
+It was good at the parts with a clear contract: the coordinate model, the unit
+and period normalisation, the relation classifier, the guardrail validators, and
+the explanation strings. Those have obvious right answers and are easy to write
+tests against, so a wrong version is caught immediately.
+
+It was much less useful for the judgement calls, and left to itself it made the
+usual mistake of building on top of a component nobody had checked. The bugs
+that mattered most in this project were all found by running the thing against a
+real provider rather than by reading the code: a rate-limited endpoint, a
+reasoning model returning `None`, a scoped rebuild quietly deleting the whole
+relations table. None of those show up in a unit test that mocks the model.
+
+The deterministic extractor in `factlayer/rules.py` exists because of one of
+those failures, and it is the part of the project that changed the most from
+what was originally planned.
 
 ## The four cases
 
-TODO: fill these in from your own run and screenshot each one.
+Everything below is from an actual run over the three starter PDFs. Reproduce it
+with `FACTLAYER_EXTRACTOR=rules uv run python cli.py starter-datasets/delhivery/*.pdf --max-pages 40`.
 
-**1. Corroborated across documents.**
-TODO. Good candidate: PTL freight tonnage FY24, stated as `1.4 Mn Tons` on page
-5 of the earnings deck and as `1,429` thousand tons on page 8. Different unit,
-different page, same quantity.
+**1. Corroborated across documents. Not achieved, and worth being precise about.**
 
-**2. Genuine or likely contradiction.**
-TODO. Look at prior-year figures restated in the FY24 annual report against the
-same figures as first reported, or run the macro dataset where the IMF and RBI
-publish different projections for the same year.
+The layer finds 11 corroborations, and every one of them is within a single
+document rather than across two. The reason is measurable: the corpus holds 489
+distinct canonical metrics and only 14 of them appear in more than one document.
+Two filings almost never print a metric with the same wording, so the blocks
+that would hold the matching pair never contain both facts.
 
-**3. Apparent contradiction explained by context.**
-TODO. Good candidates: EBITDA `₹127 Cr` against Adjusted EBITDA `₹76 Cr` for
-FY24 (basis axis), revenue from services against total revenue from operations
-(the arithmetic bridge), or FY22 tonnage on a pro forma basis including a full
-year of Spoton against the prospectus figure for the same year.
+Bridging that wording gap is exactly what the model-backed metric
+canonicalization pass is for, and it is the one step the deterministic extractor
+cannot do, because it compares surface strings without their surrounding
+context. `smoke_test.py` demonstrates this case against a hand-built corpus,
+including the unit conversion, so the reasoning is testable even though the run
+above does not produce an instance of it:
+
+```
+[CORROBORATES] Both sources report PTL freight tonnage for FY24 on the same
+basis and scope, and the values agree within the rounding implied by how they
+are printed. The figures are written differently (1.4 million tons and 1,429
+'000 tons) but resolve to the same quantity once converted to ton.
+```
+
+That is the honest position: the reasoning for this case is implemented and
+tested, the extraction is not yet good enough to feed it from the real PDFs.
+
+**2. A genuine or likely contradiction.**
+
+From the Q4 FY24 earnings deck, both facts carrying the same entity, metric,
+period, basis and scope:
+
+```
+A  EBITDA / EBITDA margin = ₹127 Cr   FY24   page 6   quote: "₹127Cr / 1.6%"
+B  EBITDA / EBITDA margin = ₹46 Cr    FY24   page 7   quote: "₹46Cr / 2.2%"
+
+Both sources report EBITDA / EBITDA margin for FY24 with identical period,
+basis and scope, yet the values differ by 810,000,000 INR, which is beyond the
+6,350,000 tolerance implied by their own precision. No context axis explains
+the gap.
+```
+
+The tolerance is derived from how the numbers are printed rather than from a
+fixed threshold, so a figure given to the nearest crore is not accused of
+disagreeing with one given to two decimals.
+
+This is a *likely* contradiction rather than a certain one, and the reason is
+instructive. Page 6 reports the full year and page 7 reports the quarter, but
+the quarter's own page does not repeat the word "Q4" next to that figure, so the
+extractor stamped both with the page-level period FY24. The relation engine then
+reasoned correctly over a coordinate that was wrong. See case 4.
+
+**3. An apparent contradiction explained by context.**
+
+Cross-document, between the FY24 annual report and the Q4 FY24 earnings deck:
+
+```
+A  EBITDA = ₹1,266 Mn   FY24   annual report, page 4    quote: "₹1,266Mn"
+B  EBITDA = (1,008)     FY24   earnings deck, page 17   quote: "(1,008) (249)"
+
+₹1,266 Mn and (1,008) look like a conflict over EBITDA, but they are stated on
+a different basis: adjusted versus reported. Once that is taken into account
+the two figures are consistent.
+```
+
+The brackets are read as negative and preserved in `value_text`, the basis is
+picked up from the surrounding page, and the two figures are separated by the
+basis axis rather than being reported as a disagreement. 36 of the 378 relations
+are cross-document, and all 36 are of this kind.
+
+The engine reconciles on four axes — period, basis, scope, and an arithmetic
+bridge where a third fact in the corpus accounts for the difference exactly.
+`smoke_test.py` covers the bridge case, which the starter documents did not
+happen to produce.
+
+**4. An extraction failure, and what was done about it.**
+
+The system reported director identification numbers as contradictions:
+
+```
+A  DIN = 05131571   FY24   annual report, page 29
+B  DIN = 03523267   FY24   annual report, page 33
+
+... the values differ by 1,608,304 unit, which is beyond the 25,658 tolerance
+implied by their own precision. No context axis explains the gap.
+```
+
+Every step there is working as designed. The numbers were copied correctly, the
+spans verify, the coordinates match, and the arithmetic is right. The failure is
+upstream of all of it: a DIN is an identifier, not a quantity, and subtracting
+one from another is meaningless. The relation engine has no way to know that,
+because by the time it sees the fact the distinction is gone.
+
+Fixed at the point where it is still visible, in the extractor rather than in
+the engine: a label naming an identifier, and a bare run of six or more digits
+with no separators or decimal point, no longer become measurements at all. That
+removed the bogus contradictions without a rule about DINs specifically, and
+without the relation engine learning anything about identifiers.
+
+The general lesson is the one that shaped the rest of the design. A relation is
+only ever as sound as the coordinates underneath it, so the useful place to
+spend effort is on making a fact's coordinates checkable, not on making the
+comparison cleverer. That is also why every fact carries the span it came from:
+it is what let this get diagnosed in about a minute.
 
 ## Limitations and next steps
 
-TODO: be specific and honest. Some real ones already visible:
+The largest one first, since it is the difference between what this does and
+what the brief asked for.
+
+**Cross-document corroboration does not happen on the starter PDFs.** 489
+canonical metrics, 14 of them shared between documents. The relation engine
+handles the case and is tested on it, but the extraction feeding it does not
+produce enough shared vocabulary for the pair to meet. Fixing this is the metric
+canonicalization pass, and the next step is to give it the fact's period, unit
+and neighbouring text rather than the metric string alone, since "revenue" in a
+table of segment revenue and "revenue" in a cash flow statement are not the same
+measurement and the surface string cannot tell you that.
+
+**The deterministic extractor takes the nearest label as the metric.** That is
+the root of most of the noise in the output: `QoQ: )` became a metric name,
+chart axis captions become metrics, and a table cell adjacent to a number can be
+attached to the wrong number entirely. It has no notion of what a number means,
+only of what is printed next to it. A layout-aware pass using PyMuPDF's bounding
+boxes, matching a value to the caption nearest it in space rather than in
+reading order, is the obvious improvement and would fix several of the entries
+below at once.
+
+**Period is inferred per page when the line does not name one.** Case 2 above
+shows what that costs: a full-year figure and a quarterly figure on adjacent
+pages both got stamped FY24, and the engine reported a contradiction it had no
+way to know was really a period difference. A wrong coordinate is worse than a
+missing one, because a missing coordinate blocks the comparison whereas a wrong
+one produces a confident and incorrect answer. Leaving the period null when the
+page's own dominant period conflicts with a nearby heading would be safer.
+
+Beyond those:
 
 - PyMuPDF's reading order interleaves chart labels and values on the FY24
   performance page of the earnings deck, so two adjacent series can be attached
@@ -427,8 +561,9 @@ TODO: be specific and honest. Some real ones already visible:
   company press release are weighted the same.
 - Multi-page tables are split at the page boundary and the continuation loses
   its header row.
-- No incremental relinking. Relations are recomputed for the whole store after
-  each upload, which is fine at this size but would not scale.
+- Relinking is incremental per entity, not per fact. An upload re-links only the
+  entities it mentions, but it re-links all of them, so adding one fact about a
+  heavily covered entity recomputes that entity's whole block.
 - Injection screening is pattern based, so it catches phrasing it has seen and
   misses paraphrase. A document that legitimately discusses prompt injection
   would also trip it. Detection is deliberately advisory rather than blocking
@@ -449,4 +584,30 @@ TODO: be specific and honest. Some real ones already visible:
 
 ## Additional notes
 
-TODO.
+**Run it without a key first.** `uv run python smoke_test.py` needs no API key,
+no network and no PDFs, and asserts all four required cases against a hand-built
+corpus in a couple of seconds. It is the fastest way to see whether the
+reasoning is sound, separately from whether the extraction is any good. Those
+are two different questions and the project keeps them apart on purpose.
+
+**The reasoning is not done by a model.** The model is used for exactly two
+jobs, reading a page into structured facts and clustering metric names. Every
+comparison, unit conversion, tolerance and contradiction decision after that is
+plain Python. That is why the explanation attached to each relation can be
+trusted: it is generated from the same values the decision was made on, so it
+cannot describe reasoning that did not happen.
+
+**Two extractors, one contract.** `FACTLAYER_EXTRACTOR` switches between a
+model-backed reader and a deterministic one. They emit the same shape and both
+pass through the same span verification, so the layer can be built with or
+without a provider. The deterministic one is weaker, and the README says where.
+
+**On the numbers.** Every figure quoted in this README came from a real run over
+the three starter PDFs with the deterministic extractor, not from the smoke
+test, except where the text says otherwise. Where the system does not do
+something, it says so rather than quoting the smoke test as though it were a
+result.
+
+**Starter datasets.** `starter-datasets/` holds the three Delhivery PDFs plus a
+second unrelated corpus of Indian macroeconomic sources, which is there to check
+that nothing had quietly been tuned to one company's filings.

@@ -100,9 +100,16 @@ STOP_LABEL = re.compile(r"^(?:and|or|the|of|in|to|for|a|an|as|at|by|on|from|"
 # Identifiers and dates are printed like quantities but are not measurements.
 # Comparing two of them would be meaningless, so they never become facts.
 IDENTIFIER_LABEL_RE = re.compile(
-    r"\b(?:date|dated|scrip|isin|cin|code|no\.?|number|ref(?:erence)?|"
-    r"tel(?:ephone)?|phone|fax|pin|gst(?:in)?|pan|regd?\.?|registration|"
-    r"folio|page|clause|section|annexure|website|email|e-mail)\b", re.I)
+    r"\b(?:date|dated|scrip|isin|cin|din|uin|lei|code|no\.?|number|"
+    r"ref(?:erence)?|tel(?:ephone)?|phone|fax|pin|gst(?:in)?|pan|aadhaar|"
+    r"regd?\.?|registration|identification|membership|folio|page|clause|"
+    r"section|annexure|schedule|website|email|e-mail)\b", re.I)
+
+# An identifier is a long run of digits with no separators and no decimal
+# point. Two of them differing is not a disagreement about a quantity, but the
+# relation engine has no way to know that, so it reported director ID numbers
+# as contradictions until these stopped becoming facts at all.
+IDLIKE_VALUE_RE = re.compile(r"^\(?\s*\d{6,}\s*\)?$")
 
 # A bare four digit year, or something already shaped like a date.
 YEARLIKE_RE = re.compile(r"^\(?\s*(?:19|20)\d{2}\s*\)?$")
@@ -282,7 +289,8 @@ def extract_page(text: str, subject: str | None = None) -> list[dict]:
             # not a measurement. So is anything sitting next to an identifier
             # label: a scrip code and a phone number compare to nothing.
             if not unit and (YEARLIKE_RE.match(value_text)
-                             or DATELIKE_RE.search(value_text)):
+                             or DATELIKE_RE.search(value_text)
+                             or IDLIKE_VALUE_RE.match(value_text)):
                 continue
 
             remainder = _clean(line[:m.start()] + " " + line[m.end():])
